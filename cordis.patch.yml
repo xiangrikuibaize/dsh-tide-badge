@@ -1,0 +1,6 @@
+# dsh-tide-badge bundle patch：把宿主半边挂进 profile 的宿主组装里。
+# 由 `dsh plugin --profile desktop add <本包>` 应用，该命令会同时把包写进
+# package.json 的 dsh.profile.bundles。
+- insert:
+    - id: tide-badge
+      name: dsh-tide-badge

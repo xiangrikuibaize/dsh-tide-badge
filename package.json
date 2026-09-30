@@ -1,0 +1,84 @@
+{
+  "name": "dsh-tide-badge",
+  "version": "0.1.0",
+  "description": "DSH 输入框下方的计费时段与余额药丸：峰价/谷价（含中国法定节假日与周末规则）、下一次切换倒计时、账户余额（桌面端账号登录态优先，API Key 兜底）。",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "node lib/build.mjs",
+    "test": "node lib/season.test.mjs",
+    "check": "node lib/build.mjs && node --check lib/client.js && node --check lib/index.js && node --check lib/season.mjs && node --check lib/holidays.mjs"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "billing",
+    "peak",
+    "off-peak",
+    "valley",
+    "holiday",
+    "balance",
+    "composer",
+    "峰谷",
+    "余额",
+    "计费"
+  ],
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-slots"
+      ],
+      "platform": "web"
+    }
+  },
+  "dshhub": {
+    "schemaVersion": 1,
+    "displayName": "dsh-tide-badge",
+    "summary": "输入框下方的峰谷计费与余额药丸：峰价/谷价（含法定节假日与周末规则）、切换倒计时、账户余额（桌面端账号优先）。",
+    "categories": [
+      "用量与计费",
+      "UI 增强"
+    ],
+    "surfaces": [
+      "host",
+      "web"
+    ],
+    "capabilities": {
+      "provides": []
+    },
+    "compatibility": {
+      "dsh": ">=0.1.0-rc.5",
+      "node": ">=20"
+    },
+    "permissions": {
+      "network": [
+        "https://api.deepseek.com",
+        "https://platform.deepseek.com"
+      ]
+    }
+  }
+}
