@@ -44,6 +44,15 @@
     "计费"
   ],
   "license": "MIT",
+  "author": "xiangrikuibaize",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xiangrikuibaize/dsh-tide-badge.git"
+  },
+  "homepage": "https://github.com/xiangrikuibaize/dsh-tide-badge#readme",
+  "bugs": {
+    "url": "https://github.com/xiangrikuibaize/dsh-tide-badge/issues"
+  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
