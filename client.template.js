@@ -21,7 +21,10 @@ window.__ModuleLoader__.load({
 
 		const STATE_URL = "/plugins/tide-badge/state";
 		const TICK_MS = 1000;
-		const CACHE_MS = 30 * 1000;
+		/** 闲多久才自动刷新余额（对话区静默计时）。 */
+		const IDLE_REFRESH_MS = 60 * 1000;
+		/** 检查“是否已闲够”的频率。 */
+		const IDLE_CHECK_MS = 5000;
 		const NARROW = "(max-width: 760px)";
 		const CSS_TAG_ID = "dsh-tide-badge/core.css";
 
@@ -192,7 +195,6 @@ window.__ModuleLoader__.load({
 
 			let panel = null;
 			let state = null;
-			let loaded = false;
 			let tick = 0;
 
 			/**
@@ -324,18 +326,23 @@ window.__ModuleLoader__.load({
 				document.addEventListener("keydown", onKey, true);
 				window.addEventListener("resize", onViewport);
 				window.addEventListener("scroll", onViewport, true);
-				if (!loaded) {
-					loaded = true;
-					state = await loadState(false);
-					fillPanel();
-					placePanel();
-				}
+				// 每次打开都取一次：面板上的余额不该是半小时前的旧值。
+				// （宿主侧有 60 秒缓存，所以频繁开关也不会真的反复打接口。）
+				state = await loadState(false);
+				fillPanel();
+				placePanel();
 			}
 
 			chip.addEventListener("click", () => {
 				if (panel === null) void openPanel();
 				else closePanel();
 			});
+
+			/** 供外部（自动刷新）把新数据交给这个芯片。 */
+			chip.__tideApply = (next) => {
+				state = next;
+				render();
+			};
 
 			render();
 			tick = window.setInterval(render, TICK_MS);
@@ -353,6 +360,68 @@ window.__ModuleLoader__.load({
 				window.clearInterval(tick);
 				closePanel();
 				chip.remove();
+			};
+		}
+
+		/**
+		 * 是否有任何会话正在运行（宿主会话列表快照里的 `running`）。
+		 *
+		 * 这只是**辅助**判据：拿不到就返回 false，让刷新照常发生 —— 绝不因为探测失败
+		 * 而把自动刷新永久关掉。它解决的是「一次性长工具调用期间界面静止」这种边界，
+		 * 主要判据仍是下面对话区的动静。
+		 */
+		function anySessionRunning() {
+			try {
+				const ctx = typeof globalThis !== "undefined" ? globalThis.__dshTideBadgeCtx : null;
+				if (ctx === null || ctx === undefined || typeof ctx.get !== "function") return false;
+				const sessions = ctx.get("sessions");
+				if (sessions === null || sessions === undefined) return false;
+				const list = sessions.list;
+				if (list === null || list === undefined || typeof list.getSnapshot !== "function") return false;
+				const snap = list.getSnapshot();
+				const rows = snap && Array.isArray(snap.sessions) ? snap.sessions : [];
+				return rows.some((r) => r && r.running === true);
+			} catch (err) {
+				return false;
+			}
+		}
+
+		/**
+		 * 对话区静止检测：返回 { lastActivity(), stop() }。
+		 *
+		 * 观察 `[data-conversation-scroll]` 的变动 —— agent 在流式输出、工具调用刷新、
+		 * 用户敲字，都会改动这棵子树。任何一次变动都刷新 lastActivity()，
+		 * 于是「闲满一分钟」自然等价于「输出结束后用户一分钟没继续」。
+		 */
+		function startActivityWatch() {
+			let last = Date.now();
+			let observer = null;
+			let tries = 0;
+
+			const root = () => document.querySelector("[data-conversation-scroll]");
+			const attach = () => {
+				if (observer !== null) return true;
+				const el = root();
+				if (el === null) return false;
+				observer = new MutationObserver(() => { last = Date.now(); });
+				observer.observe(el, { childList: true, subtree: true, characterData: true });
+				return true;
+			};
+
+			if (!attach()) {
+				// 挂载早于对话区出现时，轮询直到它出现（最多约 20 秒）
+				const timer = window.setInterval(() => {
+					tries += 1;
+					if (attach() || tries > 40) window.clearInterval(timer);
+				}, 500);
+				return {
+					lastActivity: () => last,
+					stop: () => { window.clearInterval(timer); if (observer !== null) observer.disconnect(); },
+				};
+			}
+			return {
+				lastActivity: () => last,
+				stop: () => { if (observer !== null) observer.disconnect(); },
 			};
 		}
 
@@ -382,8 +451,24 @@ window.__ModuleLoader__.load({
 				attach();
 				const observer = new MutationObserver(schedule);
 				observer.observe(document.body, { childList: true, subtree: true });
+
+				// 自动刷新：对话中不动，闲满一分钟且没有会话在跑才取一次新数据
+				const watch = startActivityWatch();
+				const idleTimer = window.setInterval(() => {
+					const chip = document.querySelector(".dsh-tide-badge");
+					if (chip === null) return;                                  // 没挂载就没必要请求
+					if (typeof document.hidden === "boolean" && document.hidden) return; // 页面在后台
+					if (Date.now() - watch.lastActivity() < IDLE_REFRESH_MS) return;     // 还在对话
+					if (anySessionRunning()) return;                            // 有会话说在跑
+					void loadState(false).then((s) => {
+						if (s && s.ok !== false && typeof chip.__tideApply === "function") chip.__tideApply(s);
+					});
+				}, IDLE_CHECK_MS);
+
 				return () => {
 					observer.disconnect();
+					window.clearInterval(idleTimer);
+					watch.stop();
 					if (teardown !== null) teardown();
 				};
 			}, []);
@@ -393,6 +478,9 @@ window.__ModuleLoader__.load({
 		const inject = ["slots"];
 
 		function apply(ctx) {
+			// 供自动刷新时探测“是否有会话在跑”。挂到 globalThis 是因为探测发生在
+			// mountChip 的定时器里，那里拿不到 apply 的闭包。
+			try { globalThis.__dshTideBadgeCtx = ctx; } catch (err) { /* 忽略 */ }
 			ctx.slots.inject("conversation.composer.dock", () =>
 				ctx.slots.register(
 					{ name: "conversation.composer.dock", id: "tide-badge", order: 10 },
