@@ -1,0 +1,39 @@
+# 通过 OIDC 受信发布（trusted publishing）发到 npm，不需要任何长期 token。
+#
+# 一次性配置（在包已存在于 npm 之后）：
+#   npm trust github dsh-tide-badge --file publish.yml \
+#       --repo xiangrikuibaize/dsh-tide-badge --allow-publish
+#
+# 之后发布：bump 版本 → 提交 → 打 tag 推送，本工作流自动完成。
+#   npm.cmd version patch -m "chore: release %s"
+#   git push --follow-tags
+
+name: publish
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # OIDC：受信发布与 provenance 都靠它
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      # 本包没有任何依赖，因此不跑 npm ci（仓库里也没有 lockfile）。
+      # 校验脚本只用 Node 内建能力。
+      - run: npm run check
+      - run: npm test
+
+      - run: npm publish

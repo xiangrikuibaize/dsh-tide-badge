@@ -8,11 +8,13 @@ DSH 输入框下方的**计费时段与余额**药丸：显示当前是**峰价*
 
 ## 安装
 
+在**插件管理器**（Add plugin）的搜索框里填 `dsh-tide-badge` 装上，或者用 CLI：
+
 ```bash
-dsh plugin --profile web add github:xiangrikuibaize/dsh-tide-badge
+dsh plugin --profile web add dsh-tide-badge
 ```
 
-装好后**重启 DSH**。药丸会出现在输入框下方、原生「缓存命中」那一排的后面。
+已发布到 npm：[dsh-tide-badge](https://www.npmjs.com/package/dsh-tide-badge)。装好后**重启 DSH**。药丸会出现在输入框下方、原生「缓存命中」那一排的后面。
 
 > 需要 DSH ≥ 0.1.0-rc.5 与 Node ≥ 20。
 

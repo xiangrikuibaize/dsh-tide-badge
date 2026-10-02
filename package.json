@@ -27,7 +27,8 @@
   "scripts": {
     "build": "node lib/build.mjs",
     "test": "node lib/season.test.mjs",
-    "check": "node lib/build.mjs && node --check lib/client.js && node --check lib/index.js && node --check lib/season.mjs && node --check lib/holidays.mjs"
+    "check": "node lib/build.mjs && node --check lib/client.js && node --check lib/index.js && node --check lib/season.mjs && node --check lib/holidays.mjs",
+    "prepublishOnly": "npm run check"
   },
   "keywords": [
     "dsh",
