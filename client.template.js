@@ -429,7 +429,7 @@ window.__ModuleLoader__.load({
 					'<div class="dsh-tide-note"></div>' +
 					'<div class="dsh-tide-foot">高峰：北京时间周一至周五 09:00–12:00、14:00–18:00（不含法定节假日）</div>';
 				panel.querySelector(".dsh-tide-refresh").addEventListener("click", async () => {
-					state = await loadState(true);
+					applyState(await loadState(true));
 					fillPanel();
 				});
 				document.body.appendChild(panel);
@@ -442,7 +442,7 @@ window.__ModuleLoader__.load({
 				window.addEventListener("scroll", onViewport, true);
 				// 每次打开都取一次：面板上的余额不该是半小时前的旧值。
 				// （宿主侧有 60 秒缓存，所以频繁开关也不会真的反复打接口。）
-				state = await loadState(false);
+				applyState(await loadState(false));
 				fillPanel();
 				placePanel();
 			}
@@ -452,25 +452,27 @@ window.__ModuleLoader__.load({
 				else closePanel();
 			});
 
-			/** 供外部（自动刷新）把新数据交给这个芯片。 */
-			chip.__tideApply = (next) => {
-				// 记账采样点：每次拿到新余额都记一笔。多数调用来自"对话停止满
-				// 一分钟"的自动刷新；首次挂载/手动刷新也会走到，那正好给新对话
-				// 播下基准值，于是新对话立刻显示 ¥0，不必等第一次闲满。
-				const nextBal = next && next.balance;
-				if (nextBal && nextBal.ok === true) observeIdle(nextBal.total);
+			/**
+			 * 把一份新状态交给芯片，并顺带记一笔账。
+			 *
+			 * 记账必须挂在这里而不是只挂在自动刷新上：只挂自动刷新的话，首次
+			 * 挂载与「打开面板时的刷新」都不会播种基准，于是新对话的「本次」要
+			 * 等第一次闲满才出现（实测就是这样）。三条路径都走这里。
+			 */
+			const applyState = (next) => {
+				if (next && next.balance && next.balance.ok === true) observeIdle(next.balance.total);
 				state = next;
 				render();
 			};
+
+			/** 供外部（自动刷新）把新数据交给这个芯片。 */
+			chip.__tideApply = (next) => applyState(next);
 
 			render();
 			tick = window.setInterval(render, TICK_MS);
 			// 后台静默刷新一次，让芯片的倒计时以宿主时刻为准
 			void loadState(false).then((s) => {
-				if (s && s.ok !== false) {
-					state = s;
-					render();
-				}
+				if (s && s.ok !== false) applyState(s);
 			});
 
 			row.appendChild(chip);
