@@ -90,13 +90,20 @@ window.__ModuleLoader__.load({
 			document.head.appendChild(tag);
 		}
 
-		/** 金额格式：跟随接口给的币种与精度。 */
+		/**
+		 * 金额格式：**符号后置**（`123¥`、`0.5$`），跟随接口给的币种与精度。
+		 *
+		 * 0 也要正常显示成 `0¥`：原实现用 `/0+$/` 去尾零，遇到 `0.0000` 会被整串
+		 * 吃成空、再被 `/\.$/` 吃掉小数点，最后只剩一个 `¥`。改成 `\.?0+$`
+		 * 只吃「小数点及其后的零」，`0` 与 `0.50` 都能留下正确数字。
+		 */
 		function formatMoney(amount, currency) {
 			if (typeof amount !== "number" || !Number.isFinite(amount)) return "--";
 			const digits = amount >= 1 ? 2 : 4;
+			const text = amount.toFixed(digits).replace(/\.?0+$/, "") || "0";
 			const symbol = currency === "CNY" ? "\u00a5" : currency === "USD" ? "$" : currency === "EUR" ? "\u20ac" : "";
-			const text = amount.toFixed(digits).replace(/0+$/, "").replace(/\.$/, "");
-			return symbol === "" ? `${text} ${currency || ""}`.trim() : `${symbol}${text}`;
+			if (symbol !== "") return `${text}${symbol}`;
+			return `${text} ${currency || ""}`.trim();
 		}
 
 		/** 宿主下发的节假日清单只应用一次，避免每次渲染都重建 Set。 */
@@ -280,6 +287,18 @@ window.__ModuleLoader__.load({
 			};
 
 			/**
+			 * 芯片上「本次 <金额>」那一段的文案。
+			 *
+			 * 币种优先跟宿主下发的余额走（账本里只存数字，不存币种）；余额取不到
+			 * 时回落到 CNY —— 这是本项目唯一支持的记账币种，好过把整段藏起来。
+			 * 永远返回非空串，调用方据此常显 `本次 0¥`。
+			 */
+			const costText = () => {
+				const bal = state && state.balance;
+				return "本次 " + formatMoney(sessionCost(), (bal && bal.currency) || "CNY");
+			};
+
+			/**
 			 * 用一次新的余额读数记账。调用点与余额刷新同步（停止后满一分钟）。
 			 * @param {number} total 余额读数
 			 */
@@ -326,11 +345,11 @@ window.__ModuleLoader__.load({
 				const balText = bal && bal.ok === true ? formatMoney(bal.total, bal.currency) : "";
 				balance.textContent = balText === "" ? "" : "\u00b7 " + balText;
 				balance.hidden = balText === "";
-				// 本次对话花费：与余额互相独立，余额取不到也照样显示已记账的累计。
-				const spent = sessionCost();
-				const costText = spent > 0 ? "本次 " + formatMoney(spent, bal && bal.currency ? bal.currency : "CNY") : "";
-				cost.textContent = costText === "" ? "" : "\u00b7 " + costText;
-				cost.hidden = costText === "";
+				// 本次对话花费：always 显示，未产生消费时为 `本次 0¥`。
+				// 不隐藏是刻意的 —— 新开对话看不到这一项时，用户无法分辨
+				// 是"还没花钱"还是"插件坏了"。
+				cost.textContent = "\u00b7 " + costText();
+				cost.hidden = false;
 				chip.title = local.title;
 				if (panel !== null) fillPanel();
 			};
