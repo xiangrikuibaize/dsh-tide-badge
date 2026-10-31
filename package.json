@@ -16,6 +16,8 @@
   },
   "files": [
     "lib",
+    "client.smoke.mjs",
+    "client.template.js",
     "cordis.patch.yml",
     "README.md",
     "LICENSE",
@@ -26,8 +28,8 @@
   },
   "scripts": {
     "build": "node lib/build.mjs",
-    "test": "node lib/season.test.mjs",
-    "check": "node lib/build.mjs && node --check lib/client.js && node --check lib/index.js && node --check lib/season.mjs && node --check lib/holidays.mjs",
+    "test": "node lib/season.test.mjs && node client.smoke.mjs",
+    "check": "node lib/build.mjs && node --check lib/client.js && node --check lib/index.js && node --check lib/season.mjs && node --check lib/holidays.mjs && node lib/season.test.mjs && node client.smoke.mjs",
     "prepublishOnly": "npm run check"
   },
   "keywords": [
@@ -82,7 +84,7 @@
       "provides": []
     },
     "compatibility": {
-      "dsh": ">=0.1.0-rc.5",
+      "dsh": ">=0.2.0",
       "node": ">=20"
     },
     "permissions": {

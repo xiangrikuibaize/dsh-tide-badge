@@ -16,7 +16,25 @@ dsh plugin --profile web add dsh-tide-badge
 
 已发布到 npm：[dsh-tide-badge](https://www.npmjs.com/package/dsh-tide-badge)。装好后**重启 DSH**。药丸会出现在输入框下方、原生「缓存命中」那一排的后面。
 
-> 需要 DSH ≥ 0.1.0-rc.5 与 Node ≥ 20。
+> 需要 DSH ≥ 0.2.0 与 Node ≥ 20。
+
+### 0.2.4：适配 DSH 0.2.x 的输入框统计行
+
+DSH 0.2 重写了输入框下方的统计行：它不再是带 `data-composer-stats` 的容器，
+而是由 `@deepseek-ai/dsh-client-ui-chat` 以**两个 dock 条目**（`activity` / `usage`）
+渲染出来的——而且 `usage`（"缓存命中"）条目在**没有 token 用量**（新会话）或
+**统计精度设为「紧凑」**（`ui-chat` 的 `performanceUsage: compact`）时，渲染的是
+一个 `<span>` 而不是 `<button>`。
+
+0.2.3 及更早版本的挂法（找到原生统计行 → 找到含「缓存命中」的 button → `appendChild`）
+因此彻底找不到锚点，药丸整条消失。
+
+0.2.4 改为：在同一个 `conversation.composer.dock` 槽位里**注册自己的条目**
+（`order: 2`，紧跟原生 `activity`(0)、`usage`(1)）。dock 本身就是一行
+`display:flex`，所以位置不变，但不再依赖任何原生 DOM 结构、文案或按钮形态，
+新会话 / 紧凑模式下也照常出现。同时"本次对话花费"的账本键改用槽位下发的
+`sessionId`（旧实现读 `ctx.get("sessions").list.getSnapshot()`，0.2.x 的
+`sessions` 服务已经没有 `list` 字段，账本会一直退化成全局单条）。
 
 ## 它做什么
 
@@ -46,6 +64,11 @@ dsh plugin --profile web add dsh-tide-badge
 - **峰价 · 2h13m** / **谷价 · 45m**，圆点颜色：峰价橙色、谷价绿色
 - 点击展开面板：计费时段（含"法定节假日"/"周末"标记）、下次切换、北京时间、账户余额（余额/赠送/充值明细）
 
+它是 `conversation.composer.dock` 这个槽位里的独立条目（原生 `activity`(0)、
+`usage`(1)，本插件 `tide-badge`(2)）。所以原生那两个药丸**没数据时不渲染**
+（新会话、或统计精度设成"紧凑"且还没有缓存命中）的场合，本药丸照样在——
+"计费时段"这件事本身不依赖 token 用量。
+
 ### 本次对话花费怎么算
 
 用**余额差值**记账，而不是 token × 单价：
@@ -55,7 +78,7 @@ dsh plugin --profile web add dsh-tide-badge
 - 因此它是**真实扣费**：缓存命中、思考 token、峰谷价都由账单自己体现，不需要维护价目表，也不会出现"算出 ¥0.42、实际扣 ¥0.51"的偏差
 - **对话进行中**显示已结算的累计值；**一轮结束满一分钟后**该轮花费被计入
 - **新对话**从 0 起算；充值（余额上升）不做负向记账，不会出现负数
-- 账本按**对话 id**分开记，存在浏览器 `localStorage`（键 `dsh-tide-badge/session-cost`），刷新/重启不丢
+- 账本按**对话 id**分开记（槽位下发的 `sessionId`），存在浏览器 `localStorage`（键 `dsh-tide-badge/session-cost`），刷新/重启不丢
 
 #### 思考期间不会取余额
 
@@ -63,12 +86,13 @@ dsh plugin --profile web add dsh-tide-badge
 
 | 条件 | 含义 |
 |---|---|
-| 芯片未挂载 | 没地方显示，没必要请求 |
 | 页面在后台 | `document.hidden` |
 | 60 秒内有动静 | `[data-conversation-scroll]` 的 DOM 变动会重置计时 |
-| 有会话在跑 | 会话快照的 `running` 为真 |
+| 有会话在跑 | 会话钩子 `useSession((s) => s.running)` 为真 |
 
 所以**模型思考超过一分钟时不会刷新余额**——思考中文字在流式输出、工具在刷新，对话区一直在变，倒计时永远差不满；`running` 也始终为真。只有整轮结束、真正静下来满 60 秒才取一次。
+
+（拿不到会话钩子时只按"动静"判断，不会因为探测失败把自动刷新永久关掉。）
 
 这对金额没有损失：差值法只要求"两次读数之间不漏"，思考期间产生的扣费会在下一次静闲读数里被一并计入。
 
@@ -145,17 +169,24 @@ lib/
   index.js            宿主半边：/plugins/tide-badge/state 只读路由
   build.mjs           把 season/holidays 内联进客户端
   client.js           由 build.mjs 生成，勿手改
-client.template.js    客户端模板
+client.template.js    客户端模板（React 条目：药丸 + 面板）
+client.smoke.mjs      客户端冒烟测试（桩掉 window/React，验纯逻辑与导出）
 cordis.patch.yml      bundle 组装补丁
 ```
 
 **两端同源**：浏览器半边是由宿主注入的普通脚本，其 `require` 不认识相对路径 import，所以 `build.mjs` 把 `season.mjs` 与 `holidays.mjs` 内联进 `client.js`。节假日清单也由宿主通过路由下发，前端用同一份源码复算 —— 保证两端算出的切换点完全一致。
 
+**客户端只依赖槽位契约**：药丸是 `conversation.composer.dock` 的一个条目，
+`sessionId` 与 `useSession` 由槽位按标准 props 下发；面板用 `react-dom` 的
+portal 挂到 `document.body`（拿不到 react-dom 时降级成就地 `position:fixed`）。
+不读原生组件的 DOM、样式或文案。
+
 ## 开发
 
 ```bash
-node lib/build.mjs          # 改完 season/holidays 后重新内联客户端
-node lib/season.test.mjs    # 跑单元测试
+node lib/build.mjs          # 改完 client.template/season/holidays 后重新生成客户端
+node lib/season.test.mjs    # 跑时段单元测试（29 项）
+node client.smoke.mjs       # 跑客户端冒烟测试（导出 + 金额/账本/面板行）
 node --check lib/client.js  # 语法校验
 ```
 

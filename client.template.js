@@ -1,19 +1,48 @@
 /**
  * dsh-tide-badge —— 浏览器半边（模板）
  *
- * 由 build.mjs 把 lib/season.mjs 内联到下面的 SEASON 标记处，生成最终的
+ * 由 build.mjs 把 lib/season.mjs 内联到下面的 SEASON_INLINE 标记处，生成最终的
  * lib/client.js。这样前端与宿主**共用同一份峰谷与节假日判定源码**，前端不必
  * 自己维护节假日表，也不会出现两端算出的切换点不一致。
  *
- * 形态沿用 billing-badge：一枚小药丸挂在输入框下方的原生统计行里（"缓存命中"
- * 那一排），点击展开面板。数据来自宿主 /plugins/tide-badge/state 单一路由。
+ * 形态：输入框下方 `conversation.composer.dock` 里的一枚小药丸（原生「缓存命中」
+ * 那一排的后面），点击展开面板。数据来自宿主 /plugins/tide-badge/state 单一路由。
+ *
+ * ⚠️ 为什么要"作为 dock 条目渲染"而不是往原生 DOM 里塞节点（0.2.4 的改动）
+ *
+ *   0.2.x 的输入框统计行换了实现：它不再是带 `data-composer-stats` 的普通容器，
+ *   而是由 ui-chat 以**两个 dock 条目**（activity / usage）渲染出来的，并且
+ *   `usage` 条目在没有 token 用量（新会话）时会直接返回 null。于是 0.2.3 里
+ *   "先找 `[data-composer-stats]`、再找含『缓存命中』的 button、然后 appendChild"
+ *   的挂法在两种情况下彻底失效：找不到锚点 → 药丸永远不出现。
+ *
+ *   现在改为：我们在同一个 dock 槽位里注册**自己的条目**（order 2，紧跟原生
+ *   activity(0)、usage(1)），药丸本身是 React 元素。dock 是 `display:flex` 的
+ *   一行，所以视觉位置不变，但不再依赖任何原生 DOM 结构或文案。
+ *
+ *   同理，"本次对话花费"的账本键改用槽位下发的 `sessionId`（旧实现读
+ *   `ctx.get("sessions").list.getSnapshot()`，0.2.x 的 sessions 服务已没有
+ *   `list` 字段，会一直退化成全局单条账）。
  */
+
 window.__ModuleLoader__.load({
 	id: "dsh-tide-badge",
 	factory: (require) => {
 		var module = { exports: {} };
 		var exports = module.exports;
 		const react = require("react");
+
+		/**
+		 * 面板要浮在整个输入框之上（原生统计对话框同样用 portal），所以挂到
+		 * document.body。宿主没有暴露 react-dom 时降级成就地 fixed 渲染。
+		 */
+		const reactDom = (() => {
+			try {
+				return require("react-dom");
+			} catch (err) {
+				return null;
+			}
+		})();
 
 		// >>> tide-badge:season（由 build.mjs 从 lib/season.mjs 内联，请勿手改） >>>
 		/* SEASON_INLINE */
@@ -27,27 +56,33 @@ window.__ModuleLoader__.load({
 		const IDLE_CHECK_MS = 5000;
 		const NARROW = "(max-width: 760px)";
 		const CSS_TAG_ID = "dsh-tide-badge/core.css";
+		/** 条目在原生 dock 里的位置：activity 是 0、usage（缓存命中）是 1。 */
+		const DOCK_ORDER = 2;
 
-		/** 样式取自原生统计行与面板，使芯片看起来是那一排的一部分。 */
+		/**
+		 * 样式对齐原生统计药丸（ui-chat 的 StatsPills）：同一套字号、内距与
+		 * hover 令牌，贴在同一行里看不出是外来条目。
+		 */
 		const CSS = `
 .dsh-tide-badge {
   box-sizing: border-box; max-width: 100%;
+  font: inherit;
+  font-size: calc(var(--dsh-content-font-size-secondary, 13px) - 1px);
+  line-height: calc(20px + var(--dsh-content-font-delta-secondary, 0px));
   color: var(--dsw-alias-label-tertiary, var(--dsw-alias-label-secondary));
-  font: inherit; font-variant-numeric: tabular-nums; line-height: inherit;
-  white-space: nowrap; background: 0 0; border: none; border-radius: 24px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap; background: 0 0; border: none; border-radius: var(--dsw-radius-sm, 8px);
   align-items: center; gap: 6px; padding: 1px 8px; display: inline-flex;
   cursor: pointer;
 }
 .dsh-tide-badge:hover, .dsh-tide-badge[aria-expanded="true"] {
-  background: var(--dsw-alias-bg-layer-2);
+  background: var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-2));
   color: var(--dsw-alias-label-secondary);
 }
 .dsh-tide-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
 .dsh-tide-muted { opacity: .6; }
 .dsh-tide-balance { opacity: .85; font-variant-numeric: tabular-nums; }
-.dsh-tide-balance[hidden] { display: none; }
-.dsh-tide-cost[hidden] { display: none; }
-/* 面板背景必须用**实心不透明**的 --dsw-alias-bg-layer-1（原生模态卡片 lc-modal-card 同款）。
+/* 面板背景必须用**实心不透明**的 --dsw-alias-bg-layer-1（原生模态卡片同款）。
    此前用的是 --dsw-specific-menu，那是覆盖层令牌、半透明，背后的对话文字会透出来。 */
 .dsh-tide-panel {
   position: fixed; z-index: 1100; box-sizing: border-box;
@@ -79,23 +114,26 @@ window.__ModuleLoader__.load({
 .dsh-tide-foot { margin-top: 10px; color: var(--dsw-alias-label-secondary); opacity: .75; }
 `;
 
-		/** 每页只注入一次样式表。 */
+		/** 每页只注入一次样式表；返回清理函数。 */
 		function injectCss() {
-			if (typeof document === "undefined") return;
-			if (document.querySelector('style[data-plugin-css="' + CSS_TAG_ID + '"]') !== null) return;
+			if (typeof document === "undefined") return () => {};
+			const existing = document.querySelector('style[data-plugin-css="' + CSS_TAG_ID + '"]');
+			if (existing !== null) return () => {};
 			const tag = document.createElement("style");
 			tag.dataset.plugin = "dsh-tide-badge";
 			tag.dataset.pluginCss = CSS_TAG_ID;
 			tag.textContent = CSS;
 			document.head.appendChild(tag);
+			return () => {
+				tag.remove();
+			};
 		}
 
 		/**
 		 * 金额格式：**符号后置**（`123¥`、`0.5$`），跟随接口给的币种与精度。
 		 *
-		 * 0 也要正常显示成 `0¥`：原实现用 `/0+$/` 去尾零，遇到 `0.0000` 会被整串
-		 * 吃成空、再被 `/\.$/` 吃掉小数点，最后只剩一个 `¥`。改成 `\.?0+$`
-		 * 只吃「小数点及其后的零」，`0` 与 `0.50` 都能留下正确数字。
+		 * 0 也要正常显示成 `0¥`：用 `/\.?0+$/` 只吃掉「小数点及其后的零」，
+		 * `0` 与 `0.50` 都能留下正确数字（旧版 `/0+$/` 会把 `0.0000` 整串吃空）。
 		 */
 		function formatMoney(amount, currency) {
 			if (typeof amount !== "number" || !Number.isFinite(amount)) return "--";
@@ -106,23 +144,110 @@ window.__ModuleLoader__.load({
 			return `${text} ${currency || ""}`.trim();
 		}
 
+		// ------------------------------------------------------------------
+		// 本次对话花费 —— 用**余额差值**记账
+		//
+		// 为什么用差值而不是 token×单价：余额减少是**真实扣费**，把缓存命中、
+		// 思考 token、峰谷价这些都交给账单自己去体现，不必维护价目表，也不会
+		// 出现"算出 ¥0.42、实际扣 ¥0.51"的偏差。
+		//
+		// 记账节奏搭在"对话停止一分钟后刷新余额"上（IDLE_REFRESH_MS）：每次拿到
+		// 新余额就与基准做差累加。于是
+		//   · 对话进行中 → 显示已结算的累计值
+		//   · 一轮结束满一分钟后 → 该轮花费被计入
+		//   · 新对话 → 基准即当前余额 → ¥0
+		//
+		// 两个已知边界：
+		//   · 余额是**账户级**读数，若同一账号在别处同时消耗，那部分会被算进来。
+		//   · 充值会让余额上升，此时不做负向记账（只累加正差值）。
+		// ------------------------------------------------------------------
+		const LEDGER_KEY = "dsh-tide-badge/session-cost";
+		/** 金额用整数单位累加，避免浮点累加误差。 */
+		const MONEY_SCALE = 1e8;
+
+		const toUnits = (value) => {
+			const n = Number(value);
+			if (!Number.isFinite(n)) return null;
+			const units = Math.round(n * MONEY_SCALE);
+			return Number.isSafeInteger(units) ? units : null;
+		};
+
+		let ledger = null;
+
+		/** 账本按**对话 id**分开记，存在浏览器 localStorage，刷新/重启不丢。 */
+		function readLedger() {
+			if (ledger !== null) return ledger;
+			ledger = {};
+			try {
+				const raw = window.localStorage.getItem(LEDGER_KEY);
+				const parsed = raw === null ? null : JSON.parse(raw);
+				if (parsed !== null && typeof parsed === "object") ledger = parsed;
+			} catch (err) {
+				/* 读不到就当新账本 */
+			}
+			return ledger;
+		}
+
+		function saveLedger() {
+			try {
+				window.localStorage.setItem(LEDGER_KEY, JSON.stringify(readLedger()));
+			} catch (err) {
+				/* 存不下不影响本次显示 */
+			}
+		}
+
+		/** 该对话已累计的花费（元）。 */
+		function sessionCostOf(key) {
+			const row = readLedger()[key];
+			const units = row !== undefined && row !== null && Number.isFinite(row.costUnits) ? row.costUnits : 0;
+			return units / MONEY_SCALE;
+		}
+
+		/**
+		 * 用一次新的余额读数记账。
+		 * @param {string} key 对话 id
+		 * @param {number} total 余额读数
+		 */
+		function observeBalance(key, total) {
+			const units = toUnits(total);
+			if (units === null) return;
+			const store = readLedger();
+			let row = store[key];
+			if (row === undefined || row === null || !Number.isFinite(row.baseUnits) || !Number.isFinite(row.costUnits)) {
+				// 第一次见到这个对话：基准取当前余额，花费记 0。
+				row = store[key] = { baseUnits: units, costUnits: 0 };
+			} else {
+				const delta = row.baseUnits - units;
+				// 差值 > 0 才是消费；余额上升（充值）不作负向记账。
+				if (delta > 0) row.costUnits += delta;
+				row.baseUnits = units;
+			}
+			saveLedger();
+		}
+
+		// ------------------------------------------------------------------
+		// 宿主状态
+		// ------------------------------------------------------------------
+
 		/** 宿主下发的节假日清单只应用一次，避免每次渲染都重建 Set。 */
-		let holidays = null;
+		let holidaysApplied = false;
 
 		/**
 		 * 读宿主状态。失败也返回可渲染的对象，绝不抛出。
 		 *
-		 * 宿主返回的 holidays 是**节假日判定的单一来源**：把它交给共用的 season
+		 * 宿主返回的 holidays 是**节假日判定的单一来源**：交给共用的 season
 		 * 源码后，前端算出的切换点与宿主完全一致（法定节假日最容易算错切换点）。
 		 */
 		async function loadState(force) {
 			try {
-				const response = await fetch(STATE_URL + (force ? "?refresh=1" : ""), { headers: { accept: "application/json" } });
+				const response = await fetch(STATE_URL + (force ? "?refresh=1" : ""), {
+					headers: { accept: "application/json" },
+				});
 				if (!response.ok) return { ok: false, error: `HTTP ${response.status}` };
 				const data = await response.json();
-				const list = data && data.season && data.season.holidays;
-				if (Array.isArray(list) && list.length > 0 && holidays === null) {
-					holidays = list;
+				const list = data !== null && data !== undefined && data.season ? data.season.holidays : undefined;
+				if (!holidaysApplied && Array.isArray(list) && list.length > 0) {
+					holidaysApplied = true;
 					setHolidays(list);
 				}
 				return data;
@@ -132,506 +257,331 @@ window.__ModuleLoader__.load({
 		}
 
 		/**
-		 * 面板正文。
-		 *
-		 * 有时段数据就用宿主下发的（与宿主时刻严格一致），否则用共用的 season
-		 * 源码本地算一份（节假日清单已由 setHolidays 注入）。
+		 * 面板正文。有时段数据就用宿主下发的（与宿主时刻严格一致），否则用共用的
+		 * season 源码本地算一份（节假日清单已由 setHolidays 注入）。
 		 */
-		function panelBody(state) {
+		function panelRows(state) {
 			const now = new Date();
 			const season = (state && state.season) || describePhase(now);
 			const bal = state && state.balance;
+			const beijing = season.beijing || beijingClock(now);
 			const flip = season.flipAt === null || season.flipAt === undefined ? null : new Date(season.flipAt);
 			const rows = [];
 
 			const kindText = season.holiday ? "（法定节假日）" : season.weekend ? "（周末）" : "";
-			rows.push(["计费时段", (season.peak ? "高峰时段（峰价）" : "空闲时段（谷价，半价）") + kindText]);
-			rows.push([
-				"下次切换",
-				season.countdown === "" || season.countdown === undefined
+			rows.push({ key: "计费时段", value: (season.peak ? "高峰时段（峰价）" : "空闲时段（谷价，半价）") + kindText });
+			rows.push({
+				key: "下次切换",
+				value: season.countdown === "" || season.countdown === undefined
 					? "--"
 					: `${season.countdown}后` + (flip === null ? "" : `，${beijingClock(flip).weekday} ${beijingClock(flip).clock}（北京）`),
-			]);
-			rows.push(["北京时间", `${season.beijing.weekday} ${season.beijing.clock}`]);
+			});
+			rows.push({ key: "北京时间", value: `${beijing.weekday} ${beijing.clock}` });
 
 			if (bal && bal.ok) {
-				rows.push(["账户余额", formatMoney(bal.total, bal.currency) + (bal.currency ? ` ${bal.currency}` : "")]);
+				rows.push({ key: "账户余额", value: formatMoney(bal.total, bal.currency) + (bal.currency ? ` ${bal.currency}` : "") });
 				const granted = typeof bal.granted === "number" ? bal.granted : 0;
 				const toppedUp = typeof bal.toppedUp === "number" ? bal.toppedUp : 0;
 				if (granted > 0) {
-					rows.push(["赠送金额", formatMoney(bal.granted, bal.currency)]);
-					if (toppedUp > 0) rows.push(["充值金额", formatMoney(bal.toppedUp, bal.currency)]);
+					rows.push({ key: "赠送金额", value: formatMoney(bal.granted, bal.currency) });
+					if (toppedUp > 0) rows.push({ key: "充值金额", value: formatMoney(bal.toppedUp, bal.currency) });
 				}
-				if (bal.isAvailable === false) rows.push(["API 调用", "余额不足", "warn"]);
+				if (bal.isAvailable === false) rows.push({ key: "API 调用", value: "余额不足", tone: "warn" });
 			} else if (bal) {
-				rows.push(["账户余额", "暂不可用"]);
+				rows.push({ key: "账户余额", value: "暂不可用" });
 			}
 			return rows;
 		}
 
-		/** 芯片要挂进的那一行：原生统计行（兼容两种形态）。 */
-		function statsRow() {
-			const legacy = document.querySelector('[data-composer-stats="true"]');
-			if (legacy !== null) return legacy;
-			const dock = document.querySelector('[data-slot="conversation.composer.dock"]');
-			if (dock === null) return null;
-			// 原生文案随语言变化，中英文都要匹配（只匹配 cache hit 会在中文界面挂不上）
-			const reading = [...dock.querySelectorAll("button")].find((el) =>
-				/cache hit|缓存命中/i.test(el.textContent || ""),
-			);
-			if (reading === undefined) return null;
-			for (const child of dock.children) {
-				if (child.contains(reading)) return child;
-			}
-			return null;
+		/**
+		 * 面板脚注：成功时说明余额来源；失败时把**两条路的原因分别摊开**，
+		 * 否则「服务不存在 / 未登录 / 平台查询失败 / 没有钱包」在界面上长得一样。
+		 */
+		function panelNote(bal) {
+			if (bal && bal.ok && bal.source === "account") return "余额来自桌面端账号登录态";
+			if (bal && bal.ok && bal.source === "key") return "余额来自 API Key";
+			const parts = [];
+			if (bal && bal.accountReason) parts.push("账号路：" + String(bal.accountReason));
+			if (bal && bal.error) parts.push("API Key 路：" + String(bal.error));
+			return parts.join("；");
 		}
 
-		/** 挂载芯片与面板。 */
-		function mountChip(row) {
-			injectCss();
+		/** 面板是否该用告警色（余额两条路都失败）。 */
+		function panelIsError(bal) {
+			return Boolean(bal && bal.ok === false);
+		}
 
-			const chip = document.createElement("button");
-			chip.type = "button";
-			chip.className = "dsh-tide-badge";
-			chip.setAttribute("aria-haspopup", "dialog");
-			chip.setAttribute("aria-expanded", "false");
+		// ------------------------------------------------------------------
+		// 组件
+		// ------------------------------------------------------------------
 
-			const dot = document.createElement("span");
-			dot.className = "dsh-tide-dot";
-			const label = document.createElement("span");
-			const count = document.createElement("span");
-			count.className = "dsh-tide-muted";
-			// 账户余额与本次对话花费都常显：不必点开面板就能看到。
-			const balance = document.createElement("span");
-			balance.className = "dsh-tide-balance";
-			const cost = document.createElement("span");
-			cost.className = "dsh-tide-muted dsh-tide-cost";
-			chip.append(dot, label, count, balance, cost);
+		/**
+		 * 药丸本体。`sessionId` / `running` 由外层按槽位契约解析后传入，
+		 * 这里只管状态、记账节奏与渲染。
+		 *
+		 * @param {{ sessionId?: string, running?: boolean }} props
+		 */
+		function TideBadgeBody(props) {
+			const sessionId = props.sessionId;
+			const running = props.running === true;
+			const key = typeof sessionId === "string" && sessionId !== "" ? sessionId : "default";
 
-			let panel = null;
-			let state = null;
-			let tick = 0;
-
-			/**
-			 * 本次对话花费 —— 用**余额差值**记账。
-			 *
-			 * 为什么用差值而不是 token×单价：余额减少是**真实扣费**，把缓存命中、
-			 * 思考 token、峰谷价这些都交给账单自己去体现，不必维护价目表，也不会
-			 * 出现"算出 ¥0.42、实际扣 ¥0.51"的偏差。
-			 *
-			 * 记账节奏搭在既有的"对话停止一分钟后刷新余额"上（IDLE_REFRESH_MS）：
-			 * 每次拿到新余额就与基准做差累加。于是
-			 *   · 对话进行中 → 显示已结算的累计值
-			 *   · 一轮结束满一分钟后 → 该轮花费被计入
-			 *   · 新对话 → 基准即当前余额 → ¥0
-			 *
-			 * 两个已知边界：
-			 *   · 余额是**账户级**读数，若同一账号在别处（手机 App、另一个 DSH）
-			 *     同时消耗，那部分会被算进来。
-			 *   · 充值会让余额上升，此时不做负向记账（只累加正差值）。
-			 */
-			const LEDGER_KEY = "dsh-tide-badge/session-cost";
-			/** 金额用整数单位累加，避免浮点累加误差。 */
-			const MONEY_SCALE = 1e8;
-			const toUnits = (v) => {
-				const n = Number(v);
-				if (!Number.isFinite(n)) return null;
-				const u = Math.round(n * MONEY_SCALE);
-				return Number.isSafeInteger(u) ? u : null;
-			};
-
-			let ledger = {};
-			try {
-				const raw = window.localStorage.getItem(LEDGER_KEY);
-				const parsed = raw === null ? null : JSON.parse(raw);
-				if (parsed !== null && typeof parsed === "object") ledger = parsed;
-			} catch (err) {
-				/* 读不到就当新账本 */
-			}
-			const saveLedger = () => {
-				try {
-					window.localStorage.setItem(LEDGER_KEY, JSON.stringify(ledger));
-				} catch (err) {
-					/* 存不下不影响本次显示 */
-				}
-			};
-
-			/** 当前对话 id。取不到时退回 "default"（全局单条账）。 */
-			const sessionKey = () => {
-				try {
-					const ctx = typeof globalThis !== "undefined" ? globalThis.__dshTideBadgeCtx : null;
-					const sessions = ctx && typeof ctx.get === "function" ? ctx.get("sessions") : null;
-					const list = sessions && sessions.list;
-					if (!list || typeof list.getSnapshot !== "function") return "default";
-					const snap = list.getSnapshot();
-					if (!snap || typeof snap !== "object") return "default";
-					if (typeof snap.current === "string" && snap.current !== "") return snap.current;
-					const byId = snap.byId;
-					if (byId && typeof byId === "object") {
-						// 没有显式 current 时，用界面自己的口径：主视图持有的那个会话。
-						for (const [id, row] of Object.entries(byId)) {
-							if (row && row.retainedBy && (row.retainedBy.mainView ?? 0) > 0) return id;
-						}
-					}
-					return "default";
-				} catch (err) {
-					return "default";
-				}
-			};
-
-			/** 本次对话已累计的花费（元）。 */
-			const sessionCost = () => {
-				const row = ledger[sessionKey()];
-				const units = row && Number.isFinite(row.costUnits) ? row.costUnits : 0;
-				return units / MONEY_SCALE;
-			};
+			const stateHook = react.useState(null);
+			const state = stateHook[0];
+			const setState = stateHook[1];
+			const openHook = react.useState(false);
+			const open = openHook[0];
+			const setOpen = openHook[1];
+			const tickHook = react.useState(0);
+			const setTick = tickHook[1];
+			const posHook = react.useState(null);
+			const pos = posHook[0];
+			const setPos = posHook[1];
+			const chipRef = react.useRef(null);
+			const panelRef = react.useRef(null);
 
 			/**
-			 * 芯片上「本次 <金额>」那一段的文案。
-			 *
-			 * 币种优先跟宿主下发的余额走（账本里只存数字，不存币种）；余额取不到
-			 * 时回落到 CNY —— 这是本项目唯一支持的记账币种，好过把整段藏起来。
-			 * 永远返回非空串，调用方据此常显 `本次 0¥`。
-			 */
-			const costText = () => {
-				const bal = state && state.balance;
-				return "本次 " + formatMoney(sessionCost(), (bal && bal.currency) || "CNY");
-			};
-
-			/**
-			 * 用一次新的余额读数记账。调用点与余额刷新同步（停止后满一分钟）。
-			 * @param {number} total 余额读数
-			 */
-			const observeIdle = (total) => {
-				const units = toUnits(total);
-				if (units === null) return;
-				const key = sessionKey();
-				let row = ledger[key];
-				if (!row || !Number.isFinite(row.baseUnits) || !Number.isFinite(row.costUnits)) {
-					// 第一次见到这个对话：基准取当前余额，花费记 0。这正是
-					// 「新开对话或此前没有此功能的显示为 0 元」。
-					row = ledger[key] = { baseUnits: units, costUnits: 0 };
-				} else {
-					const delta = row.baseUnits - units;
-					// 差值 > 0 才是消费；余额上升（充值）不作负向记账。
-					if (delta > 0) row.costUnits += delta;
-					row.baseUnits = units;
-				}
-				saveLedger();
-			};
-
-			/**
-			 * 芯片常显内容：档位 + 倒计时。
-			 *
-			 * 档位由本地共用源码判定（每秒跟随时钟），倒计时以**宿主下发的切换时刻**
-			 * 为准（它已把法定节假日算进去），本地只做秒级推进。
-			 */
-			const render = () => {
-				const local = describePhase(new Date());
-				const hostFlipAt = state && state.season ? state.season.flipAt : null;
-				let countText = "";
-				if (typeof hostFlipAt === "number" && Number.isFinite(hostFlipAt)) {
-					const remaining = hostFlipAt - Date.now();
-					countText = remaining > 0 ? formatCountdown(remaining) : "";
-				} else {
-					countText = local.countdown || "";
-				}
-				dot.style.background = local.color;
-				label.textContent = local.compact;
-				const narrow = typeof window !== "undefined" && window.matchMedia(NARROW).matches;
-				count.textContent = narrow || countText === "" ? "" : "\u00b7 " + countText;
-				// 余额常显；失败时留空而不是显示占位符，避免难看。
-				const bal = state && state.balance;
-				const balText = bal && bal.ok === true ? formatMoney(bal.total, bal.currency) : "";
-				balance.textContent = balText === "" ? "" : "\u00b7 " + balText;
-				balance.hidden = balText === "";
-				// 本次对话花费：always 显示，未产生消费时为 `本次 0¥`。
-				// 不隐藏是刻意的 —— 新开对话看不到这一项时，用户无法分辨
-				// 是"还没花钱"还是"插件坏了"。
-				cost.textContent = "\u00b7 " + costText();
-				cost.hidden = false;
-				chip.title = local.title;
-				if (panel !== null) fillPanel();
-			};
-
-			const fillPanel = () => {
-				if (panel === null) return;
-				const body = panel.querySelector(".dsh-tide-rows");
-				const note = panel.querySelector(".dsh-tide-note");
-				body.replaceChildren();
-				for (const [key, value, tone] of panelBody(state)) {
-					const dt = document.createElement("dt");
-					dt.textContent = key;
-					const dd = document.createElement("dd");
-					dd.textContent = value;
-					if (tone === "warn") dd.style.color = "var(--dsw-alias-state-warn-primary)";
-					body.append(dt, dd);
-				}
-				const bal = state && state.balance;
-				if (bal && bal.ok && bal.source === "account") {
-					note.textContent = "余额来自桌面端账号登录态";
-				} else if (bal && bal.ok && bal.source === "key") {
-					note.textContent = "余额来自 API Key";
-				} else {
-					// 失败时把两条路的原因都摊开，方便直接定位（否则四种失败长得一样）
-					const parts = [];
-					if (bal && bal.accountReason) parts.push("账号路：" + String(bal.accountReason));
-					if (bal && bal.error) parts.push("API Key 路：" + String(bal.error));
-					note.textContent = parts.join("；");
-				}
-				note.classList.toggle("dsh-tide-err", Boolean(bal && bal.ok === false));
-			};
-
-			const placePanel = () => {
-				if (panel === null) return;
-				const rect = chip.getBoundingClientRect();
-				panel.style.visibility = "hidden";
-				panel.style.left = "0px";
-				panel.style.top = "0px";
-				const width = panel.offsetWidth;
-				const height = panel.offsetHeight;
-				const left = Math.min(Math.max(8, rect.left), Math.max(8, window.innerWidth - width - 8));
-				const above = rect.top - height - 8;
-				panel.style.left = `${left}px`;
-				panel.style.top = `${above >= 8 ? above : rect.bottom + 8}px`;
-				panel.style.visibility = "";
-			};
-
-			const onDocumentPointer = (event) => {
-				if (panel === null) return;
-				if (panel.contains(event.target) || chip.contains(event.target)) return;
-				closePanel();
-			};
-			const onKey = (event) => {
-				if (event.key === "Escape") closePanel();
-			};
-			let repositioning = false;
-			const reposition = () => {
-				if (panel === null) return;
-				const rect = chip.getBoundingClientRect();
-				if (rect.bottom < 0 || rect.top > window.innerHeight) {
-					closePanel();
-					return;
-				}
-				placePanel();
-			};
-			const onViewport = () => {
-				if (panel === null || repositioning) return;
-				repositioning = true;
-				window.requestAnimationFrame(() => {
-					repositioning = false;
-					reposition();
-				});
-			};
-
-			function closePanel() {
-				if (panel === null) return;
-				panel.remove();
-				panel = null;
-				chip.setAttribute("aria-expanded", "false");
-				document.removeEventListener("pointerdown", onDocumentPointer, true);
-				document.removeEventListener("keydown", onKey, true);
-				window.removeEventListener("resize", onViewport);
-				window.removeEventListener("scroll", onViewport, true);
-			}
-
-			async function openPanel() {
-				if (panel !== null) return;
-				panel = document.createElement("div");
-				panel.className = "dsh-tide-panel";
-				panel.setAttribute("role", "dialog");
-				panel.setAttribute("aria-label", "计费时段与余额");
-				panel.innerHTML =
-					'<div class="dsh-tide-head"><span class="dsh-tide-title">计费时段与余额</span>' +
-					'<button class="dsh-tide-refresh" type="button">刷新</button></div>' +
-					'<dl class="dsh-tide-rows"></dl>' +
-					'<div class="dsh-tide-note"></div>' +
-					'<div class="dsh-tide-foot">高峰：北京时间周一至周五 09:00–12:00、14:00–18:00（不含法定节假日）</div>';
-				panel.querySelector(".dsh-tide-refresh").addEventListener("click", async () => {
-					applyState(await loadState(true));
-					fillPanel();
-				});
-				document.body.appendChild(panel);
-				chip.setAttribute("aria-expanded", "true");
-				fillPanel();
-				placePanel();
-				document.addEventListener("pointerdown", onDocumentPointer, true);
-				document.addEventListener("keydown", onKey, true);
-				window.addEventListener("resize", onViewport);
-				window.addEventListener("scroll", onViewport, true);
-				// 每次打开都取一次：面板上的余额不该是半小时前的旧值。
-				// （宿主侧有 60 秒缓存，所以频繁开关也不会真的反复打接口。）
-				applyState(await loadState(false));
-				fillPanel();
-				placePanel();
-			}
-
-			chip.addEventListener("click", () => {
-				if (panel === null) void openPanel();
-				else closePanel();
-			});
-
-			/**
-			 * 把一份新状态交给芯片，并顺带记一笔账。
+			 * 把一份新状态交给药丸，并顺带记一笔账。
 			 *
 			 * 记账必须挂在这里而不是只挂在自动刷新上：只挂自动刷新的话，首次
 			 * 挂载与「打开面板时的刷新」都不会播种基准，于是新对话的「本次」要
-			 * 等第一次闲满才出现（实测就是这样）。三条路径都走这里。
+			 * 等第一次闲满才出现（0.2.0 就是这个毛病）。三条路径都走这里。
 			 */
-			const applyState = (next) => {
-				if (next && next.balance && next.balance.ok === true) observeIdle(next.balance.total);
-				state = next;
-				render();
-			};
+			const apply = react.useCallback((next) => {
+				if (next === null || next === undefined || next.ok === false) return;
+				if (next.balance && next.balance.ok === true) observeBalance(key, next.balance.total);
+				setState(next);
+			}, [key]);
 
-			/** 供外部（自动刷新）把新数据交给这个芯片。 */
-			chip.__tideApply = (next) => applyState(next);
-
-			render();
-			tick = window.setInterval(render, TICK_MS);
-			// 后台静默刷新一次，让芯片的倒计时以宿主时刻为准
-			void loadState(false).then((s) => {
-				if (s && s.ok !== false) applyState(s);
-			});
-
-			row.appendChild(chip);
-
-			return () => {
-				window.clearInterval(tick);
-				closePanel();
-				chip.remove();
-			};
-		}
-
-		/**
-		 * 是否有任何会话正在运行（宿主会话列表快照里的 `running`）。
-		 *
-		 * 这只是**辅助**判据：拿不到就返回 false，让刷新照常发生 —— 绝不因为探测失败
-		 * 而把自动刷新永久关掉。它解决的是「一次性长工具调用期间界面静止」这种边界，
-		 * 主要判据仍是下面对话区的动静。
-		 */
-		function anySessionRunning() {
-			try {
-				const ctx = typeof globalThis !== "undefined" ? globalThis.__dshTideBadgeCtx : null;
-				if (ctx === null || ctx === undefined || typeof ctx.get !== "function") return false;
-				const sessions = ctx.get("sessions");
-				if (sessions === null || sessions === undefined) return false;
-				const list = sessions.list;
-				if (list === null || list === undefined || typeof list.getSnapshot !== "function") return false;
-				const snap = list.getSnapshot();
-				const rows = snap && Array.isArray(snap.sessions) ? snap.sessions : [];
-				return rows.some((r) => r && r.running === true);
-			} catch (err) {
-				return false;
-			}
-		}
-
-		/**
-		 * 对话区静止检测：返回 { lastActivity(), stop() }。
-		 *
-		 * 观察 `[data-conversation-scroll]` 的变动 —— agent 在流式输出、工具调用刷新、
-		 * 用户敲字，都会改动这棵子树。任何一次变动都刷新 lastActivity()，
-		 * 于是「闲满一分钟」自然等价于「输出结束后用户一分钟没继续」。
-		 */
-		function startActivityWatch() {
-			let last = Date.now();
-			let observer = null;
-			let tries = 0;
-
-			const root = () => document.querySelector("[data-conversation-scroll]");
-			const attach = () => {
-				if (observer !== null) return true;
-				const el = root();
-				if (el === null) return false;
-				observer = new MutationObserver(() => { last = Date.now(); });
-				observer.observe(el, { childList: true, subtree: true, characterData: true });
-				return true;
-			};
-
-			if (!attach()) {
-				// 挂载早于对话区出现时，轮询直到它出现（最多约 20 秒）
-				const timer = window.setInterval(() => {
-					tries += 1;
-					if (attach() || tries > 40) window.clearInterval(timer);
-				}, 500);
-				return {
-					lastActivity: () => last,
-					stop: () => { window.clearInterval(timer); if (observer !== null) observer.disconnect(); },
-				};
-			}
-			return {
-				lastActivity: () => last,
-				stop: () => { if (observer !== null) observer.disconnect(); },
-			};
-		}
-
-		/** 无渲染占位：唯一职责是让芯片始终附着在原生统计行上。 */
-		function TideMount() {
+			// 每秒重算一次倒计时与档位（宿主时刻只做基准，本地推进）。
 			react.useEffect(() => {
-				let teardown = null;
-				let scheduled = false;
+				const timer = window.setInterval(() => {
+					setTick((value) => value + 1);
+				}, TICK_MS);
+				return () => {
+					window.clearInterval(timer);
+				};
+			}, []);
 
+			// 首次挂载播种基准；之后每 5 秒检查一次「是否已闲够」再取数。
+			react.useEffect(() => {
+				let lastActivity = Date.now();
+				let observer = null;
+				let retry = null;
+
+				// 对话区静止检测：观察 [data-conversation-scroll] 的变动 —— agent 在
+				// 流式输出、工具调用刷新、用户敲字，都会改动这棵子树。任何一次变动
+				// 都刷新计时，于是「闲满一分钟」自然等价于「输出结束后用户一分钟没继续」。
 				const attach = () => {
-					if (teardown !== null && document.querySelector(".dsh-tide-badge") !== null) return;
-					const row = statsRow();
-					if (row === null) return;
-					if (teardown !== null) teardown();
-					teardown = mountChip(row);
-				};
-
-				const schedule = () => {
-					if (scheduled) return;
-					scheduled = true;
-					window.requestAnimationFrame(() => {
-						scheduled = false;
-						attach();
+					const el = document.querySelector("[data-conversation-scroll]");
+					if (el === null) return false;
+					observer = new MutationObserver(() => {
+						lastActivity = Date.now();
 					});
+					observer.observe(el, { childList: true, subtree: true, characterData: true });
+					return true;
 				};
 
-				attach();
-				const observer = new MutationObserver(schedule);
-				observer.observe(document.body, { childList: true, subtree: true });
+				if (!attach()) {
+					// 挂载早于对话区出现时，轮询直到它出现（最多约 20 秒）。
+					let tries = 0;
+					retry = window.setInterval(() => {
+						tries += 1;
+						if (attach() || tries > 40) {
+							window.clearInterval(retry);
+							retry = null;
+						}
+					}, 500);
+				}
 
-				// 自动刷新：对话中不动，闲满一分钟且没有会话在跑才取一次新数据
-				const watch = startActivityWatch();
-				const idleTimer = window.setInterval(() => {
-					const chip = document.querySelector(".dsh-tide-badge");
-					if (chip === null) return;                                  // 没挂载就没必要请求
+				void loadState(false).then(apply);
+
+				const timer = window.setInterval(() => {
+					// 以下任一成立就直接跳过，**不发起取数**：
 					if (typeof document.hidden === "boolean" && document.hidden) return; // 页面在后台
-					if (Date.now() - watch.lastActivity() < IDLE_REFRESH_MS) return;     // 还在对话
-					if (anySessionRunning()) return;                            // 有会话说在跑
-					void loadState(false).then((s) => {
-						if (s && s.ok !== false && typeof chip.__tideApply === "function") chip.__tideApply(s);
-					});
+					if (running) return;                                                 // 有会话在跑
+					if (Date.now() - lastActivity < IDLE_REFRESH_MS) return;             // 60 秒内有动静
+					void loadState(false).then(apply);
 				}, IDLE_CHECK_MS);
 
 				return () => {
-					observer.disconnect();
-					window.clearInterval(idleTimer);
-					watch.stop();
-					if (teardown !== null) teardown();
+					window.clearInterval(timer);
+					if (retry !== null) window.clearInterval(retry);
+					if (observer !== null) observer.disconnect();
 				};
-			}, []);
-			return null;
+			}, [apply, running]);
+
+			// 打开面板时按药丸位置摆放（视口内夹取，放不下就翻到下方）。
+			react.useLayoutEffect(() => {
+				if (!open) {
+					setPos(null);
+					return undefined;
+				}
+				const place = () => {
+					const chip = chipRef.current;
+					const panel = panelRef.current;
+					if (chip === null || panel === null) return;
+					const rect = chip.getBoundingClientRect();
+					const width = panel.offsetWidth;
+					const height = panel.offsetHeight;
+					const left = Math.min(Math.max(8, rect.left), Math.max(8, window.innerWidth - width - 8));
+					const above = rect.top - height - 8;
+					setPos({ left, top: above >= 8 ? above : rect.bottom + 8 });
+				};
+				place();
+				window.addEventListener("resize", place);
+				window.addEventListener("scroll", place, true);
+				return () => {
+					window.removeEventListener("resize", place);
+					window.removeEventListener("scroll", place, true);
+				};
+			}, [open, state]);
+
+			// 点外面 / 按 Escape 关闭。
+			react.useEffect(() => {
+				if (!open) return undefined;
+				const onPointer = (event) => {
+					const panel = panelRef.current;
+					const chip = chipRef.current;
+					if (panel !== null && panel.contains(event.target)) return;
+					if (chip !== null && chip.contains(event.target)) return;
+					setOpen(false);
+				};
+				const onKey = (event) => {
+					if (event.key === "Escape") setOpen(false);
+				};
+				document.addEventListener("pointerdown", onPointer, true);
+				document.addEventListener("keydown", onKey, true);
+				return () => {
+					document.removeEventListener("pointerdown", onPointer, true);
+					document.removeEventListener("keydown", onKey, true);
+				};
+			}, [open]);
+
+			// 面板上的「刷新」是强制取数（宿主侧 60 秒缓存不生效）。
+			const refresh = react.useCallback(() => {
+				void loadState(true).then(apply);
+			}, [apply]);
+
+			const local = describePhase(new Date());
+			const hostFlipAt = state && state.season ? state.season.flipAt : null;
+			let countText;
+			if (typeof hostFlipAt === "number" && Number.isFinite(hostFlipAt)) {
+				const remaining = hostFlipAt - Date.now();
+				countText = remaining > 0 ? formatCountdown(remaining) : "";
+			} else {
+				countText = local.countdown || "";
+			}
+			const narrow = typeof window !== "undefined" && window.matchMedia(NARROW).matches;
+			const bal = state && state.balance;
+			const balanceText = bal && bal.ok === true ? formatMoney(bal.total, bal.currency) : "";
+			// 本次花费永远显示（未产生消费时是 `本次 0¥`）：新开对话看不到这一项时，
+			// 用户无法分辨是"还没花钱"还是"插件坏了"。
+			const costText = "本次 " + formatMoney(sessionCostOf(key), (bal && bal.currency) || "CNY");
+			const dotColor = local.color;
+
+			const chip = react.createElement("button", {
+				ref: (node) => {
+					chipRef.current = node;
+				},
+				type: "button",
+				className: "dsh-tide-badge",
+				"aria-haspopup": "dialog",
+				"aria-expanded": open,
+				title: local.title,
+				onClick: () => {
+					setOpen(!open);
+				},
+			},
+				react.createElement("span", { className: "dsh-tide-dot", style: { background: dotColor }, "aria-hidden": true }),
+				react.createElement("span", null, local.compact),
+				countText === "" || narrow ? null : react.createElement("span", { className: "dsh-tide-muted" }, "\u00b7 " + countText),
+				balanceText === "" ? null : react.createElement("span", { className: "dsh-tide-balance" }, "\u00b7 " + balanceText),
+				react.createElement("span", { className: "dsh-tide-muted dsh-tide-cost" }, "\u00b7 " + costText),
+			);
+
+			if (!open) return react.createElement(react.Fragment, null, chip);
+
+			const rows = panelRows(state);
+			const body = react.createElement("dl", { className: "dsh-tide-rows" },
+				rows.map((row) => react.createElement(react.Fragment, { key: row.key },
+					react.createElement("dt", null, row.key),
+					react.createElement("dd", {
+						style: row.tone === "warn" ? { color: "var(--dsw-alias-state-warn-primary)" } : undefined,
+					}, row.value),
+				)),
+			);
+
+			const note = panelNote(bal);
+			const panel = react.createElement("div", {
+				ref: (node) => {
+					panelRef.current = node;
+				},
+				className: "dsh-tide-panel",
+				role: "dialog",
+				"aria-label": "计费时段与余额",
+				style: {
+					left: (pos === null ? 0 : pos.left) + "px",
+					top: (pos === null ? 0 : pos.top) + "px",
+					visibility: pos === null ? "hidden" : "visible",
+				},
+			},
+				react.createElement("div", { className: "dsh-tide-head" },
+					react.createElement("span", { className: "dsh-tide-title" }, "计费时段与余额"),
+					react.createElement("button", { type: "button", className: "dsh-tide-refresh", onClick: refresh }, "刷新"),
+				),
+				body,
+				react.createElement("div", {
+					className: panelIsError(bal) ? "dsh-tide-note dsh-tide-err" : "dsh-tide-note",
+				}, note),
+				react.createElement("div", { className: "dsh-tide-foot" },
+					"高峰：北京时间周一至周五 09:00\u201312:00、14:00\u201318:00（不含法定节假日）"),
+			);
+
+			const floating = reactDom !== null && typeof reactDom.createPortal === "function"
+				? reactDom.createPortal(panel, document.body)
+				: panel;
+			return react.createElement(react.Fragment, null, chip, floating);
+		}
+
+		/**
+		 * 有会话钩子时取 `running`（会话快照里的布尔位）。单独一层组件是为了
+		 * 让 `props.useSession` 成为**无条件**调用，符合 Hooks 规则。
+		 */
+		function TideBadgeLive(props) {
+			const running = props.useSession((snapshot) => snapshot !== null
+				&& snapshot !== undefined
+				&& snapshot.running === true) === true;
+			return react.createElement(TideBadgeBody, { sessionId: props.sessionId, running });
+		}
+
+		/**
+		 * dock 条目入口。0.2.x 的 `conversation.composer.dock` 是 session 作用域，
+		 * 标准 props 里带 `sessionId` 与 `useSession`；拿不到钩子时退化成
+		 * 「不判断 running」，绝不因为探测失败而让药丸不渲染。
+		 */
+		function TideBadge(props) {
+			const useSession = props === null || props === undefined ? undefined : props.useSession;
+			if (typeof useSession === "function") return react.createElement(TideBadgeLive, props);
+			const sessionId = props === null || props === undefined ? undefined : props.sessionId;
+			return react.createElement(TideBadgeBody, { sessionId, running: false });
 		}
 
 		const inject = ["slots"];
 
 		function apply(ctx) {
-			// 供自动刷新时探测“是否有会话在跑”。挂到 globalThis 是因为探测发生在
-			// mountChip 的定时器里，那里拿不到 apply 的闭包。
-			try { globalThis.__dshTideBadgeCtx = ctx; } catch (err) { /* 忽略 */ }
+			ctx.effect(() => injectCss(), "tide-badge: core styles");
 			ctx.slots.inject("conversation.composer.dock", () =>
 				ctx.slots.register(
-					{ name: "conversation.composer.dock", id: "tide-badge", order: 10 },
-					TideMount,
+					{ name: "conversation.composer.dock", id: "tide-badge", order: DOCK_ORDER },
+					TideBadge,
 				),
 			);
 		}
 
 		exports.apply = apply;
 		exports.inject = inject;
-		exports.__internal = { mountChip, panelBody, statsRow };
+		exports.__internal = { panelRows, panelNote, formatMoney, sessionCostOf, observeBalance };
 		return module.exports;
 	},
 });
